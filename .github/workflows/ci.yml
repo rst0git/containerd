@@ -21,7 +21,7 @@ jobs:
     strategy:
       matrix:
         go-version: [1.15.7]
-        os: [ubuntu-18.04, macos-10.15, windows-2019]
+        os: [ubuntu-20.04, macos-10.15, windows-2019]
 
     steps:
       - uses: actions/checkout@v2
@@ -45,7 +45,7 @@ jobs:
   #
   project:
     name: Project Checks
-    runs-on: ubuntu-18.04
+    runs-on: ubuntu-20.04
     timeout-minutes: 5
 
     steps:
@@ -63,7 +63,7 @@ jobs:
   #
   protos:
     name: Protobuf
-    runs-on: ubuntu-18.04
+    runs-on: ubuntu-20.04
     timeout-minutes: 5
 
     defaults:
@@ -100,7 +100,7 @@ jobs:
 
   man:
     name: Manpages
-    runs-on: ubuntu-18.04
+    runs-on: ubuntu-20.04
     timeout-minutes: 5
 
     steps:
@@ -134,7 +134,7 @@ jobs:
 
     strategy:
       matrix:
-        os: [ubuntu-18.04, macos-10.15, windows-2019]
+        os: [ubuntu-20.04, macos-10.15, windows-2019]
 
     steps:
       - uses: actions/setup-go@v1
@@ -146,6 +146,10 @@ jobs:
         run: |
           echo "GOPATH=${{ github.workspace }}" >> $GITHUB_ENV
           echo "${{ github.workspace }}/bin" >> $GITHUB_PATH
+
+      - name: Install dependencies
+        if: startsWith(matrix.os, 'ubuntu')
+        run: sudo apt-get install -qy libbtrfs-dev
 
       - uses: actions/checkout@v2
         with:
@@ -231,7 +235,7 @@ jobs:
 
   integration-linux:
     name: Linux Integration
-    runs-on: ubuntu-18.04
+    runs-on: ubuntu-20.04
     timeout-minutes: 20
     needs: [project, linters, protos, man]
 
@@ -268,6 +272,7 @@ jobs:
           sudo -E PATH=$PATH script/setup/install-runc
           sudo -E PATH=$PATH script/setup/install-cni
           sudo -E PATH=$PATH script/setup/install-critools
+          sudo apt-get install -qy libbtrfs-dev
         working-directory: src/github.com/containerd/containerd
 
       - name: Install criu
