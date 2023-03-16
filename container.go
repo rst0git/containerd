@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/containerd/containerd/api/services/tasks/v1"
 	"github.com/containerd/containerd/api/types"
@@ -326,6 +327,9 @@ func (c *container) Update(ctx context.Context, opts ...UpdateContainerOpts) err
 }
 
 func (c *container) Checkpoint(ctx context.Context, ref string, opts ...CheckpointOpts) (Image, error) {
+
+	checkpoint_start := time.Now()
+
 	index := &ocispec.Index{
 		Versioned: ver.Versioned{
 			SchemaVersion: 2,
@@ -386,7 +390,13 @@ func (c *container) Checkpoint(ctx context.Context, ref string, opts ...Checkpoi
 		return nil, err
 	}
 
-	return NewImage(c.client, checkpoint), nil
+	newImg := NewImage(c.client, checkpoint)
+
+	checkpoint_finish := time.Now()
+	duration := checkpoint_finish.Sub(checkpoint_start).Microseconds()
+	fmt.Println("containerd checkpoint duration: ", duration)
+
+	return newImg, nil
 }
 
 func (c *container) loadTask(ctx context.Context, ioAttach cio.Attach) (Task, error) {
