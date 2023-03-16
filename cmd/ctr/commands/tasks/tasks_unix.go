@@ -21,9 +21,11 @@ package tasks
 import (
 	gocontext "context"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"os/signal"
+	"time"
 
 	"github.com/containerd/console"
 	"github.com/containerd/containerd"
@@ -72,6 +74,8 @@ func NewTask(ctx gocontext.Context, client *containerd.Client, container contain
 	stdinC := &stdinCloser{
 		stdin: os.Stdin,
 	}
+
+	restore_start := time.Now()
 	if checkpoint != "" {
 		im, err := client.GetImage(ctx, checkpoint)
 		if err != nil {
@@ -117,6 +121,11 @@ func NewTask(ctx gocontext.Context, client *containerd.Client, container contain
 	stdinC.closer = func() {
 		t.CloseIO(ctx, containerd.WithStdinCloser)
 	}
+
+	restore_finish := time.Now()
+	duration := restore_finish.Sub(restore_start).Microseconds()
+	fmt.Println("containerd restore duration: ", duration)
+
 	return t, nil
 }
 
