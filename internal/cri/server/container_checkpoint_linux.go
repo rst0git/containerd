@@ -367,6 +367,10 @@ func (c *criService) CRImportCheckpoint(
 
 	meta.Config.Annotations = originalAnnotations
 
+	if dumpSpec.Linux.Devices != nil {
+		meta.Config.Devices = convertToRuntimeDevices(dumpSpec.Linux.Devices)
+	}
+
 	// Remove the checkpoint image name and show the base image name in the metadata.
 	// The checkpoint image name is still available in the annotations.
 	meta.Config.Image.Image = containerStatus.Image.GetImage()
@@ -660,6 +664,18 @@ func withCheckpointOpts(rt, rootDir string) client.CheckpointTaskOpts {
 		}
 		return nil
 	}
+}
+
+func convertToRuntimeDevices(devices []spec.LinuxDevice) []*runtime.Device {
+	var runtimeDevices []*runtime.Device
+	for _, d := range devices {
+		runtimeDevices = append(runtimeDevices, &runtime.Device{
+			ContainerPath: d.Path,
+			HostPath:      d.Path,
+			Permissions:   "rwm",
+		})
+	}
+	return runtimeDevices
 }
 
 func writeCriuCheckpointData(ctx context.Context, store content.Store, desc v1.Descriptor, cpPath string) error {
