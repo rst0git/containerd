@@ -377,6 +377,7 @@ func (c *criService) CRImportCheckpoint(
 	originalAnnotations["checkpointedAt"] = config.CheckpointedAt.Format(time.RFC3339Nano)
 	originalAnnotations["checkpointImage"] = meta.Config.Image.GetUserSpecifiedImage()
 
+	meta.Config.Labels = originalLabels
 	meta.Config.Annotations = originalAnnotations
 
 	// Remove the checkpoint image name and show the base image name in the metadata.
@@ -452,6 +453,14 @@ func (c *criService) CRImportCheckpoint(
 	containerLog := filepath.Join(containerRootDir, "container.log")
 	_, err = c.os.Stat(containerLog)
 	if err == nil {
+		// Ensure the parent directory of the log path exists. During
+		// pod-level restore the per-container log directory may not
+		// have been created yet (e.g. /var/log/pods/…/{container}/).
+		if logDir := filepath.Dir(meta.LogPath); logDir != "" {
+			if err := os.MkdirAll(logDir, 0755); err != nil {
+				return "", fmt.Errorf("creating log directory %s failed: %w", logDir, err)
+			}
+		}
 		if err := c.os.CopyFile(containerLog, meta.LogPath, 0600); err != nil {
 			return "", fmt.Errorf("restoring container log file %s failed: %w", containerLog, err)
 		}
@@ -461,19 +470,6 @@ func (c *criService) CRImportCheckpoint(
 
 func (c *criService) CheckpointContainer(ctx context.Context, r *runtime.CheckpointContainerRequest) (*runtime.CheckpointContainerResponse, error) {
 	start := time.Now()
-	if err := utils.CheckForCriu(utils.PodCriuVersion); err != nil {
-		errorMessage := fmt.Sprintf(
-			"CRIU binary not found or too old (<%d). Failed to checkpoint container %q",
-			utils.PodCriuVersion,
-			r.GetContainerId(),
-		)
-		log.G(ctx).WithError(err).Error(errorMessage)
-		return nil, fmt.Errorf(
-			"%s: %w",
-			errorMessage,
-			err,
-		)
-	}
 
 	criContainerStatus, err := c.ContainerStatus(ctx, &runtime.ContainerStatusRequest{
 		ContainerId: r.GetContainerId(),
@@ -500,6 +496,17 @@ func (c *criService) CheckpointContainer(ctx context.Context, r *runtime.Checkpo
 	i, err := container.Container.Info(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("get container info: %w", err)
+	}
+
+	// CRIU is only required for runc-based runtimes. Other runtimes
+	// (e.g. runsc/gVisor) implement checkpoint natively.
+	if i.Runtime.Name == plugins.RuntimeRuncV2 {
+		if err := utils.CheckForCriu(utils.PodCriuVersion); err != nil {
+			return nil, fmt.Errorf(
+				"CRIU binary not found or too old (<%d): checkpoint container %q: %w",
+				utils.PodCriuVersion, r.GetContainerId(), err,
+			)
+		}
 	}
 
 	configJSON, err := json.Marshal(&crmetadata.ContainerConfig{
@@ -551,35 +558,22 @@ func (c *criService) CheckpointContainer(ctx context.Context, r *runtime.Checkpo
 	}
 	defer os.RemoveAll(cpPath)
 
-	// This internal containerd file is used by checkpointctl for
-	// checkpoint archive analysis.
-	if err := c.os.CopyFile(
-		filepath.Join(c.getContainerRootDir(container.ID), crmetadata.StatusFile),
-		filepath.Join(cpPath, crmetadata.StatusFile),
-		0o600,
-	); err != nil {
-		return nil, err
+	// Copy optional metadata files into the checkpoint directory.
+	// These are produced by CRIU (stats-dump, dump.log) or containerd
+	// (status) and used by checkpointctl for archive analysis. They
+	// may not exist for non-CRIU runtimes (e.g. gVisor/runsc), so
+	// missing files are tolerated.
+	optionalFiles := []string{
+		crmetadata.StatusFile,
+		stats.StatsDump,
+		crmetadata.DumpLogFile,
 	}
-
-	// This file is created by CRIU and includes timing analysis.
-	// Also used by checkpointctl
-	if err := c.os.CopyFile(
-		filepath.Join(c.getContainerRootDir(container.ID), stats.StatsDump),
-		filepath.Join(cpPath, stats.StatsDump),
-		0o600,
-	); err != nil {
-		return nil, err
-	}
-
-	// The log file created by CRIU. This file could be missing.
-	// Let's ignore errors if the file is missing.
-	if err := c.os.CopyFile(
-		filepath.Join(c.getContainerRootDir(container.ID), crmetadata.DumpLogFile),
-		filepath.Join(cpPath, crmetadata.DumpLogFile),
-		0o600,
-	); err != nil {
-		if !errors.Is(errors.Unwrap(err), os.ErrNotExist) {
-			return nil, err
+	for _, name := range optionalFiles {
+		src := filepath.Join(c.getContainerRootDir(container.ID), name)
+		if err := c.os.CopyFile(src, filepath.Join(cpPath, name), 0o600); err != nil {
+			if !errors.Is(errors.Unwrap(err), os.ErrNotExist) {
+				return nil, err
+			}
 		}
 	}
 
