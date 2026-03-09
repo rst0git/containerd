@@ -33,6 +33,7 @@ import (
 
 	crmetadata "github.com/checkpoint-restore/checkpointctl/lib"
 	criu "github.com/checkpoint-restore/go-criu/v7"
+	"github.com/checkpoint-restore/go-criu/v7/stats"
 	"github.com/checkpoint-restore/go-criu/v7/utils"
 	"github.com/containerd/containerd/api/types/runc/options"
 	"github.com/containerd/containerd/v2/client"
@@ -47,10 +48,6 @@ import (
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"golang.org/x/sys/unix"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
-
-	// TODO: This package import is kept to prevent merge conflicts while integrating multiple
-	// branches, specifically because this changes vendoring.
-	_ "github.com/checkpoint-restore/go-criu/v7/stats"
 )
 
 // copyNoFollow copies the regular file at src to dst without following a symlink
@@ -144,9 +141,8 @@ func resolveCriuPath(customPath string) string {
 
 func (c *criService) CheckpointContainer(ctx context.Context, r *runtime.CheckpointContainerRequest) (*runtime.CheckpointContainerResponse, error) {
 	start := time.Now()
-	if err := c.checkCriu(); err != nil {
-		log.G(ctx).WithError(err).Errorf("Failed to checkpoint container %q", r.GetContainerId())
-		return nil, fmt.Errorf("failed to checkpoint container %q: %w", r.GetContainerId(), err)
+	if c.config.EnableCRIU != nil && !*c.config.EnableCRIU {
+		return nil, fmt.Errorf("failed to checkpoint container %q: %w", r.GetContainerId(), c.checkCriu())
 	}
 
 	criContainerStatus, err := c.ContainerStatus(ctx, &runtime.ContainerStatusRequest{
@@ -174,6 +170,17 @@ func (c *criService) CheckpointContainer(ctx context.Context, r *runtime.Checkpo
 	i, err := container.Container.Info(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("get container info: %w", err)
+	}
+
+	// CRIU is only required for runc-based runtimes. Other runtimes
+	// (e.g. runsc/gVisor) implement checkpoint natively.
+	if i.Runtime.Name == plugins.RuntimeRuncV2 {
+		if err := c.checkCriu(); err != nil {
+			return nil, fmt.Errorf(
+				"CRIU binary not found or too old (<%d): checkpoint container %q: %w",
+				utils.PodCriuVersion, r.GetContainerId(), err,
+			)
+		}
 	}
 
 	configJSON, err := json.Marshal(&crmetadata.ContainerConfig{
@@ -237,20 +244,26 @@ func (c *criService) CheckpointContainer(ctx context.Context, r *runtime.Checkpo
 		return nil, fmt.Errorf("failed to unmarshall blob into checkpoint data OCI index: %w", err)
 	}
 
-	// This internal containerd file is used by checkpointctl for checkpoint archive
-	// analysis. It lives in the container state dir, which can hold files from a
-	// prior checkpoint operation, so it is read without following symlinks.
-	if err := copyNoFollow(
-		filepath.Join(c.getContainerRootDir(container.ID), crmetadata.StatusFile),
-		filepath.Join(cpPath, crmetadata.StatusFile),
-		0o600,
-	); err != nil {
-		return nil, err
+	// Copy optional metadata files into the checkpoint directory.
+	// These are produced by CRIU (stats-dump, dump.log) or containerd
+	// (status) and used by checkpointctl for archive analysis. They
+	// may not exist for non-CRIU runtimes (e.g. gVisor/runsc), so
+	// missing files are tolerated. The source directory can hold files from
+	// a prior checkpoint operation, so entries are read without following
+	// final-component symlinks.
+	optionalFiles := []string{
+		crmetadata.StatusFile,
+		stats.StatsDump,
+		crmetadata.DumpLogFile,
 	}
-
-	// dump.log and stats-dump are written directly into cpPath by CRIU via its
-	// work directory (see withCheckpointOpts above), so they are already present
-	// for archiving and do not need to be copied out of the container state dir.
+	for _, name := range optionalFiles {
+		src := filepath.Join(c.getContainerRootDir(container.ID), name)
+		if err := copyNoFollow(src, filepath.Join(cpPath, name), 0o600); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
+		}
+	}
 
 	// Save the existing container log file
 	_, err = c.os.Stat(criContainerStatus.GetStatus().GetLogPath())
